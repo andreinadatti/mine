@@ -1,0 +1,133 @@
+import influxdb_client, os, time, serial
+from influxdb_client import InfluxDBClient, Point, WritePrecision
+from influxdb_client.client.write_api import SYNCHRONOUS
+
+# Configura il client InfluxDB
+token = os.environ.get("INFLUXDB_TOKEN")
+org = "andreinadatti"
+url = "http://localhost:8086"
+bucket = "mammuth"
+
+# Crea il client InfluxDB
+client = InfluxDBClient(url=url, token=token, org=org)
+write_api = client.write_api(write_options=SYNCHRONOUS)
+
+# Configura porta seriale
+try:
+    ser = serial.Serial('/dev/ttyACM0', 9600)
+except serial.SerialException as e:
+    print(f"Errore di apertura della porta seriale: {e}")
+    exit(1)
+
+while True:
+    try:
+        #Leggo una riga di dati seriali
+        data= ser.readline().decode().strip()
+        print("Dati ricevuti:", data)
+
+        #Analizza i dati
+        values= list(map(float, data.split(',')))
+        air_humidity, temperature, soil_moisture, light_intensity = values
+
+        #Invio dei punti di dati a InfluxDB
+        # Crea un punto di dati
+        point = (
+            Point("mammuth")
+            .tag("location", "hallway")
+            .field("air_humidity", air_humidity)
+            .field("temperature", temperature)
+            .field("soil_moisture", soil_moisture)
+            .field("light_intensity", light_intensity)
+        )
+        
+        # Scrivi il punto di dati nel bucket di InfluxDB
+        write_api.write(bucket=bucket, org=org, record=point)
+        
+        print("Dati inviati a InfluxDB")
+
+        # Attesa di 1 secondo tra le letture
+        time.sleep(1)
+
+        # Instanziare query del client
+        query_api = client.query_api()
+
+        # Creare query con linguaggio Flux e lo formatto come una stringa in Python
+        # La query del Client invia una query scritta in linguaggio Flux e restitusice un oggetto Flux con una struttura tabellare
+        # Query per ottenere umidità dell'aria
+        query = 'from(bucket:"mammuth")\
+        |> range(start: -10m)\
+        |> filter(fn:(r) => r._measurement == "mammuth")\
+        |> filter(fn:(r) => r.location == "hallway")\
+        |> filter(fn:(r) => r._field == "air_humidity")'
+
+        # Passare i parametri org e query al metodo query
+        result_air_humidity = query_api.query(org=org, query=query)
+
+        # Attraversare i risultati della query, estrarre i campi e i valori di ciascun record e li memorizza in ciascun record e li memorizza in tuple
+        results= []
+        for table in result_air_humidity:
+            for record in table.records:
+                results.append((record.get_field(), record.get_value()))
+
+        # Scrivere i risultati in un file di testo
+        with open("results.txt", "w") as file:
+            for field, value in results:
+                file.write(f"{field}: {value}\n")
+
+        print("Dati salvati in file results_air_humidity.txt")
+
+        # Query per ottenere l'umidità del suolo massima
+        query_soil_moisture = '''
+        from(bucket: "mammuth")
+        |> range(start: -10m)
+        |> filter(fn: (r) => r._measurement == "mammuth")
+        |> filter(fn: (r) => r.location == "hallway")
+        |> filter(fn: (r) => r._field == "soil_moisture")
+        |> max()
+        '''
+        result_soil_moisture = client.query_api().query(org=org, query=query_soil_moisture)
+
+        # Query per ottenere la temperatura massima
+        query_temperature = '''
+        from(bucket: "mammuth")
+        |> range(start: -10m)
+        |> filter(fn: (r) => r._measurement == "mammuth")
+        |> filter(fn: (r) => r.location == "hallway")
+        |> filter(fn: (r) => r._field == "temperature")
+        |> max()
+        '''
+        result_temperature = client.query_api().query(org=org, query=query_temperature)
+
+        # Scrivere i risultati dell'umidità del suolo in un file di testo
+        with open("results_soil_moisture.txt", "w") as file:
+            for table in result_soil_moisture:
+                for record in table.records:
+                    file.write(f"Max Soil Moisture: {record.get_value()}\n")
+
+        print("Dati salvati in file results_soil_moisture.txt")
+
+
+        # Scrivere i risultati della temperatura in un file di testo
+        with open("results_temp.txt", "w") as file:
+            for table in result_temperature:
+                for record in table.records:
+                    file.write(f"Max Temperature: {record.get_value()}\n")
+
+        print("Dati salvati in file results_temp.txt")
+
+    except serial.SerialException as e:
+        print(f"Errore di lettura dalla porta seriale: {e}")
+        time.sleep(1)
+
+    except influxdb_client.rest.ApiException as e:
+        print(f"Errore InfluxDB: {e}")
+        if e.status == 401:
+            print("Errore di autorizzazione: verifica il token e i permessi.")
+            print("Esporta la variabile di ambiente dal server InfluxDB.")
+        time.sleep(5)  
+    
+    except Exception as e:
+        print(f"Errore generico: {e}")
+        time.sleep(1)
+          
+       
