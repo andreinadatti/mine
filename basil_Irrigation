@@ -1,0 +1,67 @@
+#include <SimpleDHT.h>
+#define ANALOG_PIN_MOI A0
+#define DIGITAL_PIN_L 0
+#define DIGITAL_PIN_DHT 1
+//#define RELAY_PIN 8
+
+SimpleDHT22 dht22(DIGITAL_PIN_DHT);
+
+const int soil_moisture_threshold = 400; // Adatta questo valore in base ai tuoi test specifici
+const float min_temperature_threshold = 21.0; // Temperatura minima ottimale
+const float max_temperature_threshold = 26.0; // Temperatura massima ottimale
+const float min_humidity_threshold = 40.0; // Umidità minima ottimale dell'aria
+const float max_humidity_threshold = 60.0; // Umidità massima ottimale dell'aria
+//const int relayPin= 8;
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(DIGITAL_PIN_L, INPUT);
+  pinMode(ANALOG_PIN_MOI, INPUT);
+  //pinMode(RELAY_PIN, OUTPUT);
+  //digitalWrite(RELAY_PIN, LOW); //mi assicuro che la pompa sia spenta all'inizio
+}
+
+void loop() {
+  int soil_moisture= analogRead(ANALOG_PIN_MOI);
+  int light_intensity = digitalRead(DIGITAL_PIN_L);
+  float temperature=0;
+  float air_humidity=0;
+  dht22.read2(&temperature, &air_humidity, NULL);
+
+  Serial.print(air_humidity);
+  Serial.print(",");
+  Serial.print(temperature);
+  Serial.print(",");
+  Serial.print(soil_moisture);
+  Serial.print(",");
+  Serial.println(light_intensity);
+
+  if (soil_moisture > soil_moisture_threshold) {
+    //digitalWrite(relayPin, HIGH); // Accendi la pompa
+    Serial.println("Aziona la pompa.");
+  } else {
+    //digitalWrite(relayPin, LOW); // Spegni la pompa
+    Serial.println("Spegni la pompa.");
+  }
+
+  if (temperature >= max_temperature_threshold ){
+    Serial.println("Ambiente troppo caldo.");
+  }else if (temperature <= min_temperature_threshold) {
+    Serial.println("Ambiente troppo freddo.");
+  }else {
+    Serial.println("Ambiente ottimale.");
+  }
+
+  if (air_humidity >= max_humidity_threshold){
+    Serial.println("Ambiente troppo umido. Spostare pianta, ventilare la stanza.");
+  }else if (air_humidity <= min_humidity_threshold) {
+    Serial.println("Ambiente troppo secco. Ventilare la stanza, baganre il fogliame.");
+  }else {
+    Serial.println("Ambiente ottimale.");
+  }
+
+  Serial.println("---------------------------------------------");
+  delay(5000);
+
+
+}
