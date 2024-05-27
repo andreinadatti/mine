@@ -1,0 +1,304 @@
+import influxdb_client, os, time as t,  serial, shutil
+from influxdb_client import InfluxDBClient, Point, WritePrecision
+from influxdb_client.client.write_api import SYNCHRONOUS
+from datetime import datetime as dt, timedelta
+
+# Creare la cartella output_files se non esiste e eliminare quella esistente
+output_folder = "results_files"
+
+if os.path.exists(output_folder):
+    shutil.rmtree(output_folder)
+os.makedirs(output_folder)
+
+# Definire i percorsi dei file
+soil_moisture_file_path = os.path.join(output_folder, "results_soil_moisture.txt")
+air_humidity_file_path = os.path.join(output_folder, "results_air_humidity.txt")
+temp_file_path = os.path.join(output_folder, "results_temperature.txt")
+alarm_file_path = os.path.join(output_folder, "results_alarm_air_humidity.txt")
+air_humidity_mean_file_path = os.path.join(output_folder, "results_air_humidity_mean.txt")
+
+
+# Configura il client InfluxDB
+token = os.environ.get("INFLUXDB_TOKEN")
+org = "andreinadatti"
+url = "http://localhost:8086"
+bucket = "mammuth"
+
+# Crea il client InfluxDB
+client = InfluxDBClient(url=url, token=token, org=org)
+write_api = client.write_api(write_options=SYNCHRONOUS)
+
+# Impostare batchStart e batchStop (con 30 min dalla fine)
+batch_start = dt.utcnow() 
+batch_stop = dt.utcnow() + timedelta(minutes=30)
+
+# Convertire batchStart e batchStop in stringhe ISO 8601
+batch_start_str = batch_start.strftime("%Y-%m-%dT%H:%M:%SZ")
+batch_stop_str = batch_stop.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+# Funzione per trovare una porta seriale disponibile
+def find_serial_port():
+    ports = ["/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyUSB0", "/dev/ttyUSB1"]
+    for port in ports:
+        try:
+            ser = serial.Serial(port, 9600)
+            return ser
+        except serial.SerialException:
+            continue
+    raise serial.SerialException("Nessuna porta seriale disponibile trovata.")
+
+# Configurare porta seriale
+try:
+    ser = find_serial_port()
+except serial.SerialException as e:
+    print(f"Errore di apertura della porta seriale: {e}")
+    exit(1)
+
+try: 
+    while True:
+        try:
+            #Leggere una riga di dati seriali
+            data= ser.readline().decode().strip()
+            print("Dati ricevuti:", data)
+
+            #Analizza i dati
+            values= list(map(float, data.split(',')))
+            air_humidity, temperature, soil_moisture, light_intensity = values
+
+            #Invio dei punti di dati a InfluxDB
+            # Crea un punto di dati
+            point = (
+                Point("mammuth")
+                .tag("location", "hallway")
+                .field("air_humidity", air_humidity)
+                .field("temperature", temperature)
+                .field("soil_moisture", soil_moisture)
+                .field("light_intensity", light_intensity)
+            )
+            
+            # Scrivere il punto di dati nel bucket di InfluxDB
+            write_api.write(bucket=bucket, org=org, record=point)
+            
+            print("Dati inviati a InfluxDB")
+
+            # Attesa di 1 secondo tra le letture
+            t.sleep(1)
+
+            # Instanziare query del client
+            query_api = client.query_api()
+
+            # Creare query con linguaggio Flux e lo formatto come una stringa in Python
+            # La query del Client invia una query scritta in linguaggio Flux e restitusice un oggetto Flux con una struttura tabellare
+            # Query per ottenere umidità dell'aria
+            query_air_humidity = '''
+            from(bucket:"mammuth")
+            |> range(start: -10m)
+            |> filter(fn:(r) => r._measurement == "mammuth")
+            |> filter(fn:(r) => r.location == "hallway")
+            |> filter(fn:(r) => r._field == "air_humidity")
+            '''
+
+            # Passare i parametri org e query al metodo query
+            result_air_humidity = query_api.query(org=org, query=query_air_humidity)
+
+            # Attraversare i risultati della query, estrarre i campi e i valori di ciascun record e li memorizza in ciascun record e li memorizza in tuple
+            results = []
+            for table in result_air_humidity:
+                for record in table.records:
+                    results.append((record.get_field(), record.get_value()))
+            
+            # Scrivere i risultati in un file di testo
+            with open(air_humidity_file_path, "w") as file:
+                for field, value in results:
+                    file.write(f"{field}: {value}\n")
+
+            print("Dati salvati in file results_air_humidity.txt")
+
+            # Query per ottenere l'umidità del suolo massima
+            query_max_soil_moisture = f'''
+            from(bucket: "mammuth")
+            |> range(start: {batch_start_str}, stop: {batch_stop_str})
+            |> filter(fn: (r) => r._measurement == "mammuth")
+            |> filter(fn: (r) => r.location == "hallway")
+            |> filter(fn: (r) => r._field == "soil_moisture")
+            |> max()
+            '''
+            result_max_soil_moisture = query_api.query(org=org, query=query_max_soil_moisture)
+
+            # Query per ottenere l'umidità del suolo minima
+            query_min_soil_moisture = f'''
+            from(bucket: "mammuth")
+            |> range(start: {batch_start_str}, stop: {batch_stop_str})
+            |> filter(fn: (r) => r._measurement == "mammuth")
+            |> filter(fn: (r) => r.location == "hallway")
+            |> filter(fn: (r) => r._field == "soil_moisture")
+            |> min()
+            '''
+            result_min_soil_moisture = query_api.query(org=org, query=query_min_soil_moisture)
+
+            # Query per ottenere l'umidità del suolo media
+            query_soil_moisture_mean = f'''
+            from(bucket: "mammuth")
+            |> range(start: {batch_start_str}, stop: {batch_stop_str})
+            |> filter(fn: (r) => r._measurement == "mammuth" and r._field == "soil_moisture")
+            |> mean()
+            '''
+            result_soil_moisture_mean = query_api.query(org=org, query=query_soil_moisture_mean)
+
+            # Scrivere i risultati relativi all'umidità del suolo in un file di testo
+            with open(soil_moisture_file_path, "w") as file:
+                for table in result_max_soil_moisture:
+                    for record in table.records:
+                        file.write(f"Max Soil Moisture: {record.get_value()}\n")
+                for table in result_min_soil_moisture:
+                    for record in table.records:
+                        file.write(f"Min Soil Moisture: {record.get_value()}\n")
+                for table in result_soil_moisture_mean:
+                    for record in table.records:
+                        file.write(f"Mean Soil Moisture: {record.get_value():.2f}\n")
+                
+            print("Dati salvati in file results_soil_moisture.txt")
+
+            # Query per ottenere umidità dell'aria massima
+            query_max_air_humidity = f'''
+            from(bucket: "mammuth")
+            |> range(start: {batch_start_str}, stop: {batch_stop_str})
+            |> filter(fn: (r) => r._measurement == "mammuth")
+            |> filter(fn: (r) => r.location == "hallway")
+            |> filter(fn: (r) => r._field == "air_humidity")
+            |> max()
+            '''
+            result_max_air_humidity = query_api.query(org=org, query=query_max_air_humidity)
+
+            # Query per ottenere umidità dell'aria minima
+            query_min_air_humidity = f'''
+            from(bucket: "mammuth")
+            |> range(start: {batch_start_str}, stop: {batch_stop_str})
+            |> filter(fn: (r) => r._measurement == "mammuth")
+            |> filter(fn: (r) => r.location == "hallway")
+            |> filter(fn: (r) => r._field == "air_humidity")
+            |> min()
+            '''
+            result_min_air_humidity = query_api.query(org=org, query=query_min_air_humidity)
+
+            # Query per ottenere umidità dell'aria media
+            query_air_humidity_mean = f'''
+            from(bucket: "mammuth")
+            |> range(start: {batch_start_str}, stop: {batch_stop_str})
+            |> filter(fn: (r) => r._measurement == "mammuth" and r._field == "air_humidity")
+            |> mean()
+            '''
+            result_air_humidity_mean = query_api.query(org=org, query=query_air_humidity_mean)
+
+            # Scrivere i risultati relativi all'umidità dell'aria in un file di testo
+            with open(air_humidity_mean_file_path, "w") as file:
+                for table in result_max_air_humidity:
+                    for record in table.records:
+                        file.write(f"Max Air Humidity: {record.get_value()}\n")
+                for table in result_min_air_humidity:
+                    for record in table.records:
+                        file.write(f"Min Air Humidity: {record.get_value()}\n")
+                for table in result_air_humidity_mean:
+                    for record in table.records:
+                        file.write(f"Mean Air Humidity: {record.get_value():.2f}\n")
+
+            print("Dati salvati in file results_air_humidity_mean.txt")
+
+            # Query per ottenere la temperatura massima
+            query_max_temperature = '''
+            from(bucket: "mammuth")
+            |> range(start: -10m)
+            |> filter(fn: (r) => r._measurement == "mammuth")
+            |> filter(fn: (r) => r.location == "hallway")
+            |> filter(fn: (r) => r._field == "temperature")
+            |> max()
+            '''
+            result_max_temperature = query_api.query(org=org, query=query_max_temperature)
+
+            # Query per ottenere la temperatura minima
+            query_min_temperature = '''
+            from(bucket: "mammuth")
+            |> range(start: -10m)
+            |> filter(fn: (r) => r._measurement == "mammuth")
+            |> filter(fn: (r) => r.location == "hallway")
+            |> filter(fn: (r) => r._field == "temperature")
+            |> min()
+            '''
+            result_min_temperature = query_api.query(org=org, query=query_min_temperature)
+
+            # Query per ottenere temperatura media
+            query_temperature_mean = f'''
+            from(bucket: "mammuth")
+            |> range(start: {batch_start_str}, stop: {batch_stop_str})
+            |> filter(fn: (r) => r._measurement == "mammuth" and r._field == "temperature")
+            |> mean()
+            '''
+            result_temperature_mean = query_api.query(org=org, query=query_temperature_mean)
+
+            # Scrivere i risultati relativi alla temperatura in un file di testo
+            with open(temp_file_path, "w") as file:
+                for table in result_max_temperature:
+                    for record in table.records:
+                        file.write(f"Max Temperature: {record.get_value():.2f}\n")
+                for table in result_min_temperature:
+                    for record in table.records:
+                        file.write(f"Min Temperature: {record.get_value():.2f}\n")
+                for table in result_temperature_mean:
+                    for record in table.records:
+                        file.write(f"Mean Temperature: {record.get_value():.2f}\n")
+
+            print("Dati salvati in file results_temperature.txt")
+            
+            # Query per settare allarme se umidiità aria supera soglia 50
+            query_alarm = '''
+            from(bucket: "mammuth")
+            |> range(start: -10m)
+            |> filter(fn: (r) => r._measurement == "mammuth")
+            |> filter(fn: (r) => r.location == "hallway")
+            |> filter(fn: (r) => r._field == "air_humidity")
+            |> map(fn: (r) => ({_time: r._time, _value: r._value, state: if r._value < 50 then "warning" else "ok"}))
+            '''
+            result_alarm = query_api.query(org=org, query=query_alarm)
+            results_alarm = []
+            for table in result_alarm:
+                for record in table.records:
+                    state = record.values.get("state", "unknown")
+                    results_alarm.append((record.get_time(), record.get_value(), state))
+            
+            with open(alarm_file_path, "w") as file:
+                for time, value, state in results_alarm:
+                    file.write(f"Time: {time}, Value: {value}, State: {state}\n")
+
+            print("Dati salvati in file results_alarm_air_humidity.txt")
+
+            print("------------------------------------------------------")
+
+        except serial.SerialException as e:
+            print(f"Errore di lettura dalla porta seriale: {e}")
+            exit()
+            
+
+        except influxdb_client.rest.ApiException as e:
+            print(f"Errore InfluxDB: {e}")
+            if e.status == 401:
+                print("Errore di autorizzazione: verifica il token e i permessi.")
+                print("Esporta la variabile di ambiente dal server InfluxDB.")
+            exit()
+              
+        
+        except Exception as e:
+            print(f"Errore generico: {e}")
+            exit()
+            
+
+# Invio messaggio di terminazione Ctrl+C
+except KeyboardInterrupt:
+    print()
+    print("Interruzione del programma da tastiera. Terminazione in corso...")
+
+# Chiudo la connessione seriale, chiudo la connessione con InfluxDB
+finally:
+    ser.close()  
+    client.close() 
+    print("Connessioni chiuse correttamente.")
+
